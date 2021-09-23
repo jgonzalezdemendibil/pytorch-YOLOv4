@@ -423,6 +423,11 @@ def get_image_id(filename:str) -> int:
     >>> no = f"{int(no):04d}"
     >>> return int(lv+no)
     """
+    string_list = list(filter(str.isdigit, filename))
+    id_img = int("".join(string_list))
+    return id_img
+
+
     raise NotImplementedError("Create your own 'get_image_id' function")
     lv, no = os.path.splitext(os.path.basename(filename))[0].split("_")
     lv = lv.replace("level", "")

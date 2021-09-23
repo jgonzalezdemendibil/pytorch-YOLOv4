@@ -37,6 +37,10 @@ from tool.tv_reference.utils import collate_fn as val_collate
 from tool.tv_reference.coco_utils import convert_to_coco_api
 from tool.tv_reference.coco_eval import CocoEvaluator
 
+import mlflow
+import mlflow.pytorch
+
+
 
 def bboxes_iou(bboxes_a, bboxes_b, xyxy=True, GIoU=False, DIoU=False, CIoU=False):
     """Calculate the Intersection of Unions (IoUs) between bounding boxes.
@@ -289,6 +293,20 @@ def collate(batch):
 
 
 def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=20, img_scale=0.5):
+
+    os.environ['MLFLOW_S3_ENDPOINT_URL'] = 'http://localhost:9000' #MinIO container ip
+    os.environ['AWS_ACCESS_KEY_ID'] = 'vicom'
+    os.environ['AWS_SECRET_ACCESS_KEY'] = 'vicomtech'
+    
+    mlflow.set_tracking_uri("http://localhost:5000") # mlflow container ip
+    tags = {
+        "usuario": "jgonzalezdemendibil"
+    }
+    mlflow.set_experiment("5GMETA-pytorch-yolov4")
+    mlflow.start_run()
+    mlflow.set_tags(tags)
+    
+
     train_dataset = Yolo_dataset(config.train_label, config, train=True)
     val_dataset = Yolo_dataset(config.val_label, config, train=False)
 
@@ -296,7 +314,7 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
     n_val = len(val_dataset)
 
     train_loader = DataLoader(train_dataset, batch_size=config.batch // config.subdivisions, shuffle=True,
-                              num_workers=8, pin_memory=True, drop_last=True, collate_fn=collate)
+                              num_workers=0, pin_memory=True, drop_last=True, collate_fn=collate)
 
     val_loader = DataLoader(val_dataset, batch_size=config.batch // config.subdivisions, shuffle=True, num_workers=8,
                             pin_memory=True, drop_last=True, collate_fn=val_collate)
@@ -323,8 +341,14 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
         Optimizer:       {config.TRAIN_OPTIMIZER}
         Dataset classes: {config.classes}
         Train label path:{config.train_label}
-        Pretrained:
+        Pretrained:      {config.pretrained}
     ''')
+    
+    params= {"Epochs": epochs, "Batch size": config.batch, "Subdivisions": config.subdivisions, 
+        "Learning rate": config.learning_rate, "Training size": n_train, "Validation size": n_val, "Checkpoints": save_cp, "Device": device.type, 
+        "Images size": config.width, "Optimizer": config.TRAIN_OPTIMIZER, "Dataset classes": config.classes, "Train label path": config.train_label, 
+        "Pretrained": config.pretrained}
+    mlflow.log_params(params)
 
     # learning rate setup
     def burnin_schedule(i):
@@ -409,6 +433,8 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
                                           loss_wh.item(), loss_obj.item(),
                                           loss_cls.item(), loss_l2.item(),
                                           scheduler.get_lr()[0] * config.batch))
+                    
+                
 
                 pbar.update(images.shape[0])
 
@@ -456,8 +482,24 @@ def train(model, device, config, epochs=5, batch_size=1, save_cp=True, log_step=
                         os.remove(model_to_remove)
                     except:
                         logging.info(f'failed to remove {model_to_remove}')
+        
+            metrics = {"Loss": loss.item(), "loss_xy": loss_xy.item(), "loss_wh": loss_wh.item(), "loss_obj": loss_obj.item(),
+                        "loss_cls": loss_cls.item(), "loss_l2": loss_l2.item(), "lr": scheduler.get_lr()[0] * config.batch,
+                        'train/AP': stats[0], 'train/AP50': stats[1], 'train/AP75': stats[2], 'train/AP_small': stats[3], 
+                        'train/AP_medium': stats[4], 'train/AP_large': stats[5], 'train/AR1': stats[6], 'train/AR10': stats[7],
+                        'train/AR100': stats[8], 'train/AR_small': stats[9], 'train/AR_medium': stats[10], 'train/AR_large': stats[11] }
+            step = epoch
+            mlflow.log_metrics(metrics, step)            
+
+    #Log the model as an artifact of the MLflow run.
+    print("\nLogging the trained model as a run artifact...")
+    mlflow.pytorch.log_model(model, artifact_path="model")
+    print("\nThe model is logged at:\n%s" % os.path.join(mlflow.get_artifact_uri(), "model"))
 
     writer.close()
+
+    # end mlflow run
+    mlflow.end_run()
 
 
 @torch.no_grad()
